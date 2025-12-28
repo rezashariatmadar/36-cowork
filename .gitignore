@@ -1,0 +1,32 @@
+# --- Python / Django ---
+__pycache__/
+*.py[cod]
+*.log
+
+# Local DB (SQLite)
+backend/db.sqlite3
+
+# Environments
+backend/.venv/
+.env
+
+# Django collected/static/media (optional; adjust to your plan)
+backend/staticfiles/
+backend/media/
+
+# --- Tests / tooling ---
+.pytest_cache/
+.coverage
+.mypy_cache/
+
+# --- PyCharm / IntelliJ ---
+.idea/
+*.iws
+
+# --- Node / Vite ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
