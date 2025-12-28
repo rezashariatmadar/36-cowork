@@ -6,8 +6,6 @@ User = get_user_model()
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
-    national_id = serializers.CharField(validators=[validate_national_id])
-    mobile = serializers.CharField(validators=[validate_mobile_number])
 
     class Meta:
         model = User

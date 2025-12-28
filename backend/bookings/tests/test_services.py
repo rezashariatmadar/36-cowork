@@ -9,7 +9,7 @@ class BookingServiceTests(TestCase):
     def setUp(self):
         self.space = Space.objects.create(
             name="Service Test Space",
-            capacity=10,
+            capacity=1,
             hourly_rate=100.00
         )
         self.today = jdatetime.date.today()

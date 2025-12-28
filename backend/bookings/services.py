@@ -7,6 +7,13 @@ import datetime
 
 class BookingService:
     @staticmethod
+    def safe_send_email(booking_id):
+        try:
+            send_booking_confirmation_email.delay(booking_id)
+        except Exception as e:
+            print(f"Warning: Failed to queue email task for booking {booking_id}: {e}")
+
+    @staticmethod
     def create_booking(data):
         """
         Creates a booking with validation, transaction, and audit logging.
@@ -37,7 +44,7 @@ class BookingService:
                 
                 # Trigger email sending (async)
                 # transaction.on_commit ensures the DB row exists before Celery picks it up
-                transaction.on_commit(lambda: send_booking_confirmation_email.delay(booking.id))
+                transaction.on_commit(lambda: BookingService.safe_send_email(booking.id))
                 
                 return booking
         except Exception as e:
@@ -53,7 +60,8 @@ class BookingService:
     @staticmethod
     def check_overlap(space, date, start_time, end_time):
         """
-        Checks if the requested time overlaps with existing confirmed/pending bookings.
+        Checks if the requested time overlaps with existing confirmed/pending bookings
+        exceeding the space's capacity.
         """
         qs = Booking.objects.filter(
             space=space,
@@ -61,67 +69,149 @@ class BookingService:
             status__in=['pending', 'confirmed']
         )
         
+        # We need to check if AT ANY POINT in the requested range, 
+        # the number of active bookings >= capacity.
+        # This requires checking the 'density' of bookings.
+        
+        # Simple approach for validation:
+        # Check against every booking. If we find `capacity` number of bookings
+        # that ALL overlap with the requested time AND each other, that's a problem.
+        # But 'overlap with each other' is the hard part.
+        
+        # Reliable approach:
+        # 1. Get all bookings that overlap with requested [start_time, end_time].
+        # 2. If len(overlapping_bookings) < space.capacity, we are definitely safe. 
+        #    (Even if they all overlap each other, they don't fill the room).
+        
+        overlapping_bookings = []
         for b in qs:
+            # Check intersection
             if start_time < b.end_time and end_time > b.start_time:
-                return True
-        return False
+                overlapping_bookings.append(b)
+        
+        if len(overlapping_bookings) < space.capacity:
+            return False
+
+        # 3. If count >= capacity, we need to check if they actually overlap *simultaneously*
+        # to exceed capacity at any specific minute.
+        # We do a "Sweep Line" algorithm on the overlapping bookings.
+        
+        events = []
+        for b in overlapping_bookings:
+            # Limit the event scope to the requested window for efficiency
+            # (only care about overlaps INSIDE the requested window)
+            s = max(start_time, b.start_time)
+            e = min(end_time, b.end_time)
+            if s < e:
+                events.append((s, 1))  # Start of a booking
+                events.append((e, -1)) # End of a booking
+        
+        events.sort(key=lambda x: x[0])
+        
+        current_occupancy = 0
+        max_occupancy = 0
+        
+        for _, change in events:
+            current_occupancy += change
+            if current_occupancy > max_occupancy:
+                max_occupancy = current_occupancy
+                
+        # If max_occupancy reaches capacity, we can't add one more.
+        return max_occupancy >= space.capacity
 
 class AvailabilityService:
     @staticmethod
     def get_available_slots(space, date):
         """
-        Calculates available slots for a given space and date.
-        Returns a list of dicts: [{'start': '08:00', 'end': '10:00'}, ...]
+        Calculates available slots for a given space and date, respecting capacity.
         """
-        # 1. Get defined availability (Business Hours)
-        availabilities = list(Availability.objects.filter(
+        # 1. Define Business Hours (Default 08:00 - 23:00)
+        # In a real app, this might come from the Space model or separate Settings.
+        day_start = datetime.time(8, 0)
+        day_end = datetime.time(23, 0)
+        
+        # Check specific availability overrides
+        availabilities = Availability.objects.filter(
             space=space,
             date_jalali=date,
             is_available=True
-        ))
-        
-        # If no specific availability defined, assume default full day open (08:00 - 23:00)
-        # This meets the "all times are open" requirement for now.
-        if not availabilities:
-            class DefaultAvailability:
-                start_time = datetime.time(8, 0)
-                end_time = datetime.time(23, 0)
-            availabilities = [DefaultAvailability()]
+        )
+        if availabilities.exists():
+            # Use the union of defined availability windows? 
+            # For simplicity, let's take the first one or iterate. 
+            # The current requirement is just "calculate available slots".
+            # Let's assume the first positive availability defines the day's bounds.
+            avail = availabilities.first()
+            day_start = avail.start_time
+            day_end = avail.end_time
 
         # 2. Get existing bookings
         bookings = Booking.objects.filter(
             space=space,
             booking_date_jalali=date,
             status__in=['pending', 'confirmed']
-        ).order_by('start_time')
+        )
 
-        # 3. Calculate gaps
-        final_slots = []
+        # 3. Sweep Line Algorithm to find "Free" windows
+        # Events: (time, type)
+        # type: +1 (booking start), -1 (booking end)
         
-        for avail in availabilities:
-            current_start = avail.start_time
-            avail_end = avail.end_time
+        events = []
+        # Add bookings as events
+        for b in bookings:
+            # Clip booking times to business hours
+            s = max(day_start, b.start_time)
+            e = min(day_end, b.end_time)
+            if s < e:
+                events.append((s, 1))
+                events.append((e, -1))
+
+        # Sort events. 
+        # Crucial: if times are equal, process END (-1) before START (+1) 
+        # to strictly allow touching intervals? 
+        # No, usually we want to see occupancy. 
+        events.sort(key=lambda x: x[0])
+        
+        available_slots = []
+        current_occupancy = 0
+        
+        # We scan from day_start to day_end
+        # We need to construct intervals where current_occupancy < space.capacity
+        
+        last_time = day_start
+        
+        # Insert "boundary" events to ensure we process the full day
+        # But real events are driven by bookings.
+        # We just need to iterate through the timeline.
+        
+        # Merging duplicate timestamps in events is helpful but not strictly required if logic is robust.
+        
+        for time_point, change in events:
+            # Before applying change, check the interval [last_time, time_point]
+            if time_point > last_time:
+                if current_occupancy < space.capacity:
+                    # This interval is free!
+                    # Check if we can merge with previous slot?
+                    if available_slots and available_slots[-1]['end_time'] == last_time:
+                        available_slots[-1]['end_time'] = time_point
+                    else:
+                        available_slots.append({
+                            'start_time': last_time,
+                            'end_time': time_point
+                        })
             
-            # Find bookings that intersect this availability window
-            relevant_bookings = [
-                b for b in bookings 
-                if b.end_time > current_start and b.start_time < avail_end
-            ]
+            current_occupancy += change
+            last_time = time_point
             
-            for b in relevant_bookings:
-                if b.start_time > current_start:
-                    final_slots.append({
-                        'start_time': current_start,
-                        'end_time': b.start_time
+        # Handle tail (from last event to day_end)
+        if last_time < day_end:
+            if current_occupancy < space.capacity:
+                 if available_slots and available_slots[-1]['end_time'] == last_time:
+                        available_slots[-1]['end_time'] = day_end
+                 else:
+                    available_slots.append({
+                        'start_time': last_time,
+                        'end_time': day_end
                     })
-                
-                if b.end_time > current_start:
-                    current_start = b.end_time
-            
-            if current_start < avail_end:
-                 final_slots.append({
-                        'start_time': current_start,
-                        'end_time': avail_end
-                    })
-                    
-        return final_slots
+
+        return available_slots

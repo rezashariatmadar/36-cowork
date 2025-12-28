@@ -8,7 +8,7 @@ const api = axios.create({
 });
 
 export const getSpaces = async () => {
-  constresponse = await api.get('/spaces/');
+  const response = await api.get('/spaces/');
   return response.data;
 };
 

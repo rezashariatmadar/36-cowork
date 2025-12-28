@@ -11,7 +11,7 @@ class DefaultAvailabilityTests(TestCase):
         self.client = APIClient()
         self.space = Space.objects.create(
             name="Default Space",
-            capacity=5,
+            capacity=1,
             hourly_rate=100.00
         )
         self.today_jalali = jdatetime.date.today()

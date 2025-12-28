@@ -4,21 +4,19 @@ import api from '../services/api';
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
+  const [token, setToken] = useState(() => {
+      const t = localStorage.getItem('token');
+      if (t) api.defaults.headers.common['Authorization'] = `Token ${t}`;
+      return t;
+  });
   const [user, setUser] = useState(null);
-  const [token, setToken] = useState(localStorage.getItem('token'));
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (token) {
-      // In a real app, we might verify token or fetch user profile here
-      // For now, we assume if token exists, user is logged in.
-      // We can decode user info if using JWT, or just store user object in localStorage too.
-      // Let's assume we store user basic info or just rely on token.
       api.defaults.headers.common['Authorization'] = `Token ${token}`;
-      setLoading(false);
     } else {
-        delete api.defaults.headers.common['Authorization'];
-        setLoading(false);
+      delete api.defaults.headers.common['Authorization'];
     }
   }, [token]);
 

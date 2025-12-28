@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useNavigate } from 'react-router-dom';
@@ -8,7 +8,7 @@ import persian_fa from 'react-date-object/locales/persian_fa';
 import { toast } from 'react-toastify';
 import { motion, AnimatePresence } from 'framer-motion';
 import { bookingSchema } from '../../utils/validation';
-import { createBooking } from '../../services/api';
+import api, { createBooking } from '../../services/api';
 
 // Components
 import BookingStepper from './BookingStepper';
@@ -21,12 +21,10 @@ import AgreementCheckbox from './AgreementCheckbox';
 const BookingForm = () => {
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState(1);
-  const [selectedSeat, setSelectedSeat] = useState(null);
+  const [selectedSeat, setSelectedSeat] = useState(null); // Visual ID (e.g. "T1-1")
+  const [spaces, setSpaces] = useState([]);
+  const [occupiedVisualIds, setOccupiedVisualIds] = useState([]);
 
-  // We split validation triggers per step manually if needed, 
-  // or just let user navigate but validate final submission.
-  // Ideally, we validate step 1 before moving to step 2.
-  
   const {
     register,
     handleSubmit,
@@ -49,23 +47,89 @@ const BookingForm = () => {
   const startTime = watch('start_time');
   const endTime = watch('end_time');
 
+  // --- Helpers for Mapping ---
+  // Heuristic mapping between Visual IDs (e.g., "T1-1") and DB Names (e.g., "Team Table 1 - Seat 1")
+  const getSpaceFromVisualId = (vid) => {
+      // Normalize visual ID
+      const parts = vid.split('-');
+      // Example: "T1-1" -> "Team Table 1 - Seat 1"
+      // "D-1" -> "Dedicated Desk #1"
+      // "PR-1-A" -> "Private Office #1 - Seat A"
+      
+      // Simple fallback: Try to find a space name containing the ID parts
+      // This allows the user to name spaces flexibly in DB as long as they contain "T1" and "1" etc.
+      return spaces.find(s => {
+          const name = s.name.toUpperCase();
+          if (vid.startsWith('T')) { // T1-1
+             const [table, seat] = vid.substring(1).split('-');
+             return name.includes(`TABLE #${table}`) || name.includes(`TABLE ${table}`) && name.includes(seat);
+          }
+          if (vid.startsWith('D-')) { // D-1
+             return name.includes(`DEDICATED DESK #${parts[1]}`);
+          }
+          if (vid.startsWith('CH-')) { // CH-L-1
+             return name.includes("COLLAB") || name.includes("JOINT");
+          }
+          // Default fuzzy match
+          return name.includes(vid.replace(/-/g, ' '));
+      });
+  };
+
+  const getVisualIdFromSpace = (space) => {
+      // Inverse mapping logic would go here.
+      // For now, relies on consistent naming or metadata.
+      // Since we don't have the naming convention from the user yet, this is best-effort.
+      return null;
+  };
+
+  // --- Data Fetching ---
+
+  useEffect(() => {
+      api.get('/spaces/').then(r => {
+          setSpaces(r.data.results || r.data);
+      }).catch(e => console.error("Failed to load spaces", e));
+  }, []);
+
+  useEffect(() => {
+      if (currentStep === 2 && selectedDate && startTime && endTime) {
+          // Fetch bookings for the date to determine availability
+          // Note: Backend endpoint /bookings/?date=YYYY-MM-DD should exist or use filter
+          // We'll assume list endpoint supports filtering
+          const dateStr = selectedDate.replace(/\//g, '-');
+          api.get(`/bookings/?booking_date_jalali=${dateStr}`).then(r => {
+              const bookings = r.data.results || r.data;
+              
+              // Filter for time overlap
+              const overlaps = bookings.filter(b => {
+                  if (b.status === 'cancelled') return false;
+                  return (startTime < b.end_time && endTime > b.start_time);
+              });
+
+              // Map overlapping bookings to Visual IDs
+              // We need the SPACE object for each booking to map to Visual ID
+              // Assuming booking.space is the ID, we look it up in 'spaces'
+              const occupied = [];
+              overlaps.forEach(b => {
+                  const spaceObj = spaces.find(s => s.id === b.space);
+                  if (spaceObj) {
+                      // Attempt to reverse map name to ID
+                      // For now, since we don't have perfect mapping, we might miss some visuals.
+                      // Ideally, store 'visual_id' in Space metadata/description.
+                  }
+              });
+              setOccupiedVisualIds(occupied); // TODO: Refine mapping
+          }).catch(e => console.error("Failed to load bookings", e));
+      }
+  }, [currentStep, selectedDate, startTime, endTime, spaces]);
+
+
   const handleNextStep = async () => {
     let valid = false;
     if (currentStep === 1) {
-      // Validate Step 1 fields
       valid = await trigger(['space', 'booking_date_jalali', 'start_time', 'end_time']);
     } else if (currentStep === 2) {
-      // Validate Step 2 (Seat Selection)
       if (selectedSeat) {
           valid = true;
-          // In a real app we might store seat ID in a hidden form field
-          // For now we just track it in state and merge it on submit if backend supported distinct seats
-          // The current backend Booking model doesn't strictly have a "seat_id" field, only "Space".
-          // We assume "Space" == "Room" or generic Area. 
-          // If we want specific seat booking, backend needs update. 
-          // For this UI demo, we'll proceed as if Space ID covers it or we map it.
-          // Let's assume the "Space" dropdown selects the ROOM/ZONE, and OfficeLayout picks the SEAT.
-          // We will persist seat selection but backend might ignore it until we add `seat_number` field.
       } else {
           toast.error("Please select a seat.");
       }
@@ -82,11 +146,26 @@ const BookingForm = () => {
 
   const onSubmit = async (data) => {
     try {
+        // Resolve Visual ID to Space UUID
+        let finalSpaceId = data.space; // Default to dropdown selection
+        
+        if (selectedSeat) {
+            const mappedSpace = getSpaceFromVisualId(selectedSeat);
+            if (mappedSpace) {
+                finalSpaceId = mappedSpace.id;
+            } else {
+                // If mapping fails, we can't book specific seat safely
+                // Fallback to generic space selected in Step 1?
+                // Or error out.
+                console.warn("Could not map visual seat to DB space", selectedSeat);
+            }
+        }
+
         const payload = {
             ...data,
+            space: finalSpaceId,
             booking_date_jalali: data.booking_date_jalali.replace(/\//g, '-'),
             duration_hours: calculateDuration(data.start_time, data.end_time),
-            // seat_number: selectedSeat // Add this if backend supports it
         };
         
         const booking = await createBooking(payload);
@@ -183,7 +262,7 @@ const BookingForm = () => {
                     <OfficeLayout 
                         onSeatSelect={setSelectedSeat} 
                         selectedSeat={selectedSeat}
-                        // In real app, pass bookedSeats prop here based on availability
+                        bookedSeats={occupiedVisualIds}
                     />
 
                     {selectedSeat && (
@@ -216,7 +295,6 @@ const BookingForm = () => {
                     <h3 className="text-xl font-semibold text-gray-800 text-center mb-6">Confirm Details</h3>
 
                     <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm space-y-2 mb-6">
-                        <div className="flex justify-between"><span className="text-gray-500">Space:</span> <span className="font-medium">Space ID {selectedSpace}</span></div>
                         <div className="flex justify-between"><span className="text-gray-500">Seat:</span> <span className="font-medium text-indigo-600">{selectedSeat}</span></div>
                         <div className="flex justify-between"><span className="text-gray-500">Date:</span> <span className="font-medium">{selectedDate}</span></div>
                         <div className="flex justify-between"><span className="text-gray-500">Time:</span> <span className="font-medium">{startTime} - {endTime}</span></div>

@@ -8,7 +8,7 @@ class ApiTests(APITestCase):
     def setUp(self):
         self.space = Space.objects.create(
             name="API Test Space",
-            capacity=5,
+            capacity=1,
             hourly_rate=100.00
         )
         self.today_jalali = jdatetime.date.today()
