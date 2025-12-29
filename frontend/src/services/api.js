@@ -12,11 +12,12 @@ export const getSpaces = async () => {
   return response.data;
 };
 
-export const getAvailability = async (spaceId, date) => {
-  // date should be in YYYY-MM-DD Jalali format
-  const response = await api.get('/availability/', {
-    params: { space_id: spaceId, date },
-  });
+export const getSeats = async (date) => {
+  // date: YYYY-MM-DD (Jalali)
+  const params = {};
+  if (date) params.date = date;
+  
+  const response = await api.get('/seats/', { params });
   return response.data;
 };
 

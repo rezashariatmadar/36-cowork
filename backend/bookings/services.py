@@ -1,5 +1,5 @@
 from django.db import transaction
-from .models import Booking, AuditLog, Space, Availability
+from .models import Booking, AuditLog
 from django.core.exceptions import ValidationError
 from .tasks import send_booking_confirmation_email
 import jdatetime
@@ -18,16 +18,18 @@ class BookingService:
         """
         Creates a booking with validation, transaction, and audit logging.
         """
-        space = data.get('space')
-        date = data.get('booking_date_jalali')
+        seat = data.get('seat')
+        start_date = data.get('start_date_jalali')
+        end_date = data.get('end_date_jalali')
         start_time = data.get('start_time')
         end_time = data.get('end_time')
+        booking_type = data.get('booking_type', 'hourly')
 
-        # Check for overlaps
-        if BookingService.check_overlap(space, date, start_time, end_time):
+        # Check availability
+        if not AvailabilityService.is_seat_available(seat, start_date, end_date, start_time, end_time):
              raise ValidationError(
-                 "The selected time slot is already booked.",
-                 code='slot_unavailable'
+                 "The selected seat is not available for the requested time.",
+                 code='seat_unavailable'
              )
 
         try:
@@ -39,179 +41,81 @@ class BookingService:
                     booking=booking,
                     action='created',
                     new_status=booking.status,
-                    notes="Booking created via API"
+                    notes=f"Booking created ({booking_type})"
                 )
                 
-                # Trigger email sending (async)
-                # transaction.on_commit ensures the DB row exists before Celery picks it up
                 transaction.on_commit(lambda: BookingService.safe_send_email(booking.id))
                 
                 return booking
         except Exception as e:
-            # If it's already a ValidationError, re-raise it
             if isinstance(e, ValidationError):
                 raise e
-            # Otherwise wrap it
             raise ValidationError(
                 f"Failed to create booking: {str(e)}",
                 code='booking_creation_failed'
             )
 
-    @staticmethod
-    def check_overlap(space, date, start_time, end_time):
-        """
-        Checks if the requested time overlaps with existing confirmed/pending bookings
-        exceeding the space's capacity.
-        """
-        qs = Booking.objects.filter(
-            space=space,
-            booking_date_jalali=date,
-            status__in=['pending', 'confirmed']
-        )
-        
-        # We need to check if AT ANY POINT in the requested range, 
-        # the number of active bookings >= capacity.
-        # This requires checking the 'density' of bookings.
-        
-        # Simple approach for validation:
-        # Check against every booking. If we find `capacity` number of bookings
-        # that ALL overlap with the requested time AND each other, that's a problem.
-        # But 'overlap with each other' is the hard part.
-        
-        # Reliable approach:
-        # 1. Get all bookings that overlap with requested [start_time, end_time].
-        # 2. If len(overlapping_bookings) < space.capacity, we are definitely safe. 
-        #    (Even if they all overlap each other, they don't fill the room).
-        
-        overlapping_bookings = []
-        for b in qs:
-            # Check intersection
-            if start_time < b.end_time and end_time > b.start_time:
-                overlapping_bookings.append(b)
-        
-        if len(overlapping_bookings) < space.capacity:
-            return False
-
-        # 3. If count >= capacity, we need to check if they actually overlap *simultaneously*
-        # to exceed capacity at any specific minute.
-        # We do a "Sweep Line" algorithm on the overlapping bookings.
-        
-        events = []
-        for b in overlapping_bookings:
-            # Limit the event scope to the requested window for efficiency
-            # (only care about overlaps INSIDE the requested window)
-            s = max(start_time, b.start_time)
-            e = min(end_time, b.end_time)
-            if s < e:
-                events.append((s, 1))  # Start of a booking
-                events.append((e, -1)) # End of a booking
-        
-        events.sort(key=lambda x: x[0])
-        
-        current_occupancy = 0
-        max_occupancy = 0
-        
-        for _, change in events:
-            current_occupancy += change
-            if current_occupancy > max_occupancy:
-                max_occupancy = current_occupancy
-                
-        # If max_occupancy reaches capacity, we can't add one more.
-        return max_occupancy >= space.capacity
-
 class AvailabilityService:
     @staticmethod
-    def get_available_slots(space, date):
+    def is_seat_available(seat, start_date, end_date, start_time=None, end_time=None):
         """
-        Calculates available slots for a given space and date, respecting capacity.
+        Checks if a specific seat is available for the given range.
         """
-        # 1. Define Business Hours (Default 08:00 - 23:00)
-        # In a real app, this might come from the Space model or separate Settings.
-        day_start = datetime.time(8, 0)
-        day_end = datetime.time(23, 0)
-        
-        # Check specific availability overrides
-        availabilities = Availability.objects.filter(
-            space=space,
-            date_jalali=date,
-            is_available=True
-        )
-        if availabilities.exists():
-            # Use the union of defined availability windows? 
-            # For simplicity, let's take the first one or iterate. 
-            # The current requirement is just "calculate available slots".
-            # Let's assume the first positive availability defines the day's bounds.
-            avail = availabilities.first()
-            day_start = avail.start_time
-            day_end = avail.end_time
-
-        # 2. Get existing bookings
-        bookings = Booking.objects.filter(
-            space=space,
-            booking_date_jalali=date,
-            status__in=['pending', 'confirmed']
+        # 1. Query potential conflicting bookings
+        # We look for any booking on this seat that overlaps in DATE first.
+        qs = Booking.objects.filter(
+            seat=seat,
+            status__in=['pending', 'confirmed'],
+            start_date_jalali__lte=end_date,
+            end_date_jalali__gte=start_date
         )
 
-        # 3. Sweep Line Algorithm to find "Free" windows
-        # Events: (time, type)
-        # type: +1 (booking start), -1 (booking end)
+        for booking in qs:
+            # Check for actual overlap
+            if AvailabilityService.check_overlap(
+                start_date, end_date, start_time, end_time,
+                booking.start_date_jalali, booking.end_date_jalali, booking.start_time, booking.end_time,
+                booking.booking_type
+            ):
+                return False
         
-        events = []
-        # Add bookings as events
-        for b in bookings:
-            # Clip booking times to business hours
-            s = max(day_start, b.start_time)
-            e = min(day_end, b.end_time)
-            if s < e:
-                events.append((s, 1))
-                events.append((e, -1))
+        return True
 
-        # Sort events. 
-        # Crucial: if times are equal, process END (-1) before START (+1) 
-        # to strictly allow touching intervals? 
-        # No, usually we want to see occupancy. 
-        events.sort(key=lambda x: x[0])
+    @staticmethod
+    def check_overlap(req_start_date, req_end_date, req_start_time, req_end_time,
+                      exist_start_date, exist_end_date, exist_start_time, exist_end_time,
+                      exist_type):
+        """
+        Determines if two intervals overlap.
+        """
+        # Date overlap is already guaranteed by the query filter (start <= end AND end >= start)
         
-        available_slots = []
-        current_occupancy = 0
+        # If existing booking is NOT hourly, it consumes the full dates.
+        # Since dates overlap, it's a conflict.
+        if exist_type != 'hourly':
+            return True
         
-        # We scan from day_start to day_end
-        # We need to construct intervals where current_occupancy < space.capacity
-        
-        last_time = day_start
-        
-        # Insert "boundary" events to ensure we process the full day
-        # But real events are driven by bookings.
-        # We just need to iterate through the timeline.
-        
-        # Merging duplicate timestamps in events is helpful but not strictly required if logic is robust.
-        
-        for time_point, change in events:
-            # Before applying change, check the interval [last_time, time_point]
-            if time_point > last_time:
-                if current_occupancy < space.capacity:
-                    # This interval is free!
-                    # Check if we can merge with previous slot?
-                    if available_slots and available_slots[-1]['end_time'] == last_time:
-                        available_slots[-1]['end_time'] = time_point
-                    else:
-                        available_slots.append({
-                            'start_time': last_time,
-                            'end_time': time_point
-                        })
-            
-            current_occupancy += change
-            last_time = time_point
-            
-        # Handle tail (from last event to day_end)
-        if last_time < day_end:
-            if current_occupancy < space.capacity:
-                 if available_slots and available_slots[-1]['end_time'] == last_time:
-                        available_slots[-1]['end_time'] = day_end
-                 else:
-                    available_slots.append({
-                        'start_time': last_time,
-                        'end_time': day_end
-                    })
+        # If requested booking is NOT hourly (and existing IS hourly), 
+        # the request consumes full dates. Conflict.
+        # (We don't strictly know request type here but if req_start_time is None, it's daily+)
+        if req_start_time is None or req_end_time is None:
+            return True
 
-        return available_slots
+        # If both are hourly:
+        # We need to check if they are on the SAME day(s).
+        # Assuming hourly bookings are single-day for simplicity (enforced in validation).
+        # If dates don't touch exactly, they might not overlap in time? 
+        # But the date filter says they overlap.
+        
+        # If the overlap involves the same date, we check time.
+        # Simplest logic: If valid time ranges are provided for both, check time intersection.
+        # If multiple days are involved in hourly booking (edge case), this logic might be too simple,
+        # but let's assume single-day hourly.
+        
+        if req_start_date == exist_start_date:
+             # Check time overlap
+             # (StartA < EndB) and (EndA > StartB)
+             if req_start_time < exist_end_time and req_end_time > exist_start_time:
+                 return True
+                 
+        return False

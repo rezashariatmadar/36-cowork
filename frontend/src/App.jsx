@@ -10,8 +10,7 @@ import BookingPage from './pages/BookingPage';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
 const ProtectedRoute = ({ children }) => {
-    const { token, loading } = useAuth();
-    if (loading) return <div>Loading...</div>;
+    const { token } = useAuth();
     if (!token) return <Navigate to="/login" replace />;
     return children;
 };

@@ -10,7 +10,6 @@ export const AuthProvider = ({ children }) => {
       return t;
   });
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (token) {
@@ -54,8 +53,8 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, registerUser, loading }}>
-      {!loading && children}
+    <AuthContext.Provider value={{ user, token, login, logout, registerUser }}>
+      {children}
     </AuthContext.Provider>
   );
 };

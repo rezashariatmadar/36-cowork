@@ -1,6 +1,6 @@
 from django.test import TestCase
 from django.core.exceptions import ValidationError
-from bookings.models import Space, Booking, AuditLog
+from bookings.models import Space, Booking, AuditLog, Seat
 from bookings.services import BookingService
 import jdatetime
 import datetime
@@ -12,17 +12,24 @@ class BookingServiceTests(TestCase):
             capacity=1,
             hourly_rate=100.00
         )
+        self.seat = Seat.objects.create(
+            space=self.space,
+            visual_id="S-1",
+            name="Service Seat"
+        )
         self.today = jdatetime.date.today()
         self.valid_data = {
-            'space': self.space,
+            'seat': self.seat,
             'full_name': "Service User",
             'national_id': "0060495219",
             'mobile': "09123456789",
-            'booking_date_jalali': self.today,
+            'start_date_jalali': self.today,
+            'end_date_jalali': self.today,
             'start_time': datetime.time(9, 0),
             'end_time': datetime.time(11, 0),
             'duration_hours': 2.0,
-            'terms_accepted': True
+            'terms_accepted': True,
+            'booking_type': 'hourly'
         }
 
     def test_create_booking_happy_path(self):
@@ -44,7 +51,7 @@ class BookingServiceTests(TestCase):
         # Try to create exact same booking
         with self.assertRaises(ValidationError) as cm:
             BookingService.create_booking(self.valid_data)
-        self.assertEqual(cm.exception.code, 'slot_unavailable')
+        self.assertEqual(cm.exception.code, 'seat_unavailable')
 
     def test_overlap_protection_partial(self):
         BookingService.create_booking(self.valid_data) # 9-11
@@ -56,7 +63,7 @@ class BookingServiceTests(TestCase):
         
         with self.assertRaises(ValidationError) as cm:
             BookingService.create_booking(overlap_data)
-        self.assertEqual(cm.exception.code, 'slot_unavailable')
+        self.assertEqual(cm.exception.code, 'seat_unavailable')
 
     def test_touching_edges_allowed(self):
         BookingService.create_booking(self.valid_data) # 9-11
@@ -70,10 +77,6 @@ class BookingServiceTests(TestCase):
         self.assertIsNotNone(booking.id)
 
     def test_transaction_rollback_on_error(self):
-        # Simulate an error during creation after booking save but before return
-        # We can't easily inject inside the method without mocking.
-        # However, we can test that if validation fails BEFORE save, nothing is saved.
-        
         # Force a validation error (e.g. overlap)
         BookingService.create_booking(self.valid_data)
         

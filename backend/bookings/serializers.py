@@ -1,11 +1,18 @@
 from rest_framework import serializers
-from .models import Space, Booking, Availability
+from .models import Space, Booking, Availability, Seat
 from .services import BookingService
 import jdatetime
+import datetime
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 class SpaceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Space
+        fields = '__all__'
+
+class SeatSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Seat
         fields = '__all__'
 
 class BookingSerializer(serializers.ModelSerializer):
@@ -14,66 +21,77 @@ class BookingSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'status', 'created_at', 'updated_at']
 
-    def validate_booking_date_jalali(self, value):
-        """
-        Check that the date is not in the past and not too far in the future.
-        """
-        import datetime
-        # Fix: DRF DateField returns datetime.date with Jalali components if passed string like '1403-...'
-        # We need to ensure we compare apples to apples.
+    def to_jdate(self, value):
         if isinstance(value, datetime.date) and not isinstance(value, jdatetime.date):
-            value = jdatetime.date(value.year, value.month, value.day)
-
-        today = jdatetime.date.today()
-        
-        if value < today:
-            raise serializers.ValidationError(
-                "Booking date cannot be in the past.",
-                code='past_date'
-            )
-        
-        # Limit to 6 months in future
-        # Simple approximation: 6 * 30 = 180 days
-        max_future = today + jdatetime.timedelta(days=180)
-        if value > max_future:
-             raise serializers.ValidationError(
-                "Booking date cannot be more than 6 months in the future.",
-                code='date_too_far'
-            )
-        
+            return jdatetime.date(value.year, value.month, value.day)
         return value
 
+    def validate_start_date_jalali(self, value):
+        value = self.to_jdate(value)
+        today = jdatetime.date.today()
+        if value < today:
+             raise serializers.ValidationError("Start date cannot be in the past.", code='past_date')
+        return value
+
+    def validate_end_date_jalali(self, value):
+        return self.to_jdate(value)
+
     def validate(self, data):
-        """
-        Check for overlaps using the service.
-        """
-        space = data.get('space')
-        date = data.get('booking_date_jalali')
+        seat = data.get('seat')
+        booking_type = data.get('booking_type', 'hourly')
+        start_date = self.to_jdate(data.get('start_date_jalali'))
+        end_date = self.to_jdate(data.get('end_date_jalali'))
         start_time = data.get('start_time')
         end_time = data.get('end_time')
 
-        if start_time and end_time and start_time >= end_time:
-            raise serializers.ValidationError(
-                "End time must be after start time.",
-                code='invalid_time_range'
-            )
+        # 1. Duration Rules
+        if seat:
+            if booking_type == 'hourly' and not seat.space.allow_hourly:
+                raise serializers.ValidationError("Hourly bookings are not allowed for this space.")
+            if booking_type == 'daily' and not seat.space.allow_daily:
+                raise serializers.ValidationError("Daily bookings are not allowed for this space.")
+            if booking_type == 'weekly' and not seat.space.allow_weekly:
+                raise serializers.ValidationError("Weekly bookings are not allowed for this space.")
+            if booking_type == 'monthly' and not seat.space.allow_monthly:
+                raise serializers.ValidationError("Monthly bookings are not allowed for this space.")
 
-        if space and date and start_time and end_time:
-             if BookingService.check_overlap(space, date, start_time, end_time):
-                raise serializers.ValidationError(
-                    "The selected time slot is already booked.",
-                    code='slot_unavailable'
-                )
+        # 2. Date Logic
+        if start_date and end_date:
+            if start_date > end_date:
+                raise serializers.ValidationError("Start date must be before or equal to end date.")
+            
+            if booking_type == 'hourly' and start_date != end_date:
+                 raise serializers.ValidationError("Hourly bookings must be on the same day.")
+
+        # 3. Time Logic
+        if booking_type == 'hourly':
+            if not start_time or not end_time:
+                raise serializers.ValidationError("Start and End times are required for hourly bookings.")
+            if start_time >= end_time:
+                raise serializers.ValidationError("End time must be after start time.")
 
         return data
 
     def create(self, validated_data):
-        # Use service to create
-        return BookingService.create_booking(validated_data)
+        try:
+            return BookingService.create_booking(validated_data)
+        except DjangoValidationError as e:
+            # Convert to DRF ValidationError to preserve code/detail structure if possible
+            if hasattr(e, 'error_dict'):
+                raise serializers.ValidationError(e.message_dict)
+            elif hasattr(e, 'error_list'):
+                 # Extract code if available
+                 # e.error_list is a list of ValidationError objects
+                 details = []
+                 for error in e.error_list:
+                     details.append(error.message)
+                     # Handling code with DRF is tricky with simple strings
+                 raise serializers.ValidationError(details, code=e.code if hasattr(e, 'code') else 'invalid')
+            else:
+                raise serializers.ValidationError(e.message, code=e.code if hasattr(e, 'code') else 'invalid')
 
 class AvailabilitySerializer(serializers.Serializer):
     """
-    Serializer for calculated availability slots (not the model).
+    Serializer for checking availability status (simplified).
     """
-    start_time = serializers.TimeField()
-    end_time = serializers.TimeField()
+    is_available = serializers.BooleanField()

@@ -3,13 +3,18 @@ from django.utils.html import format_html
 from django_jalali.admin.filters import JDateFieldListFilter
 from unfold.admin import ModelAdmin
 from unfold.decorators import action, display
-from .models import Space, Booking, Availability, AuditLog
+from .models import Space, Booking, Availability, AuditLog, Seat
+
+class SeatInline(admin.TabularInline):
+    model = Seat
+    extra = 1
 
 @admin.register(Space)
 class SpaceAdmin(ModelAdmin):
-    list_display = ('name', 'type', 'capacity', 'hourly_rate', 'is_active_badge')
+    list_display = ('name', 'type', 'capacity', 'hourly_rate', 'daily_rate', 'is_active_badge')
     list_filter = ('type', 'is_active', 'capacity')
     search_fields = ('name', 'description')
+    inlines = [SeatInline]
     actions = ['make_active', 'make_inactive']
 
     @display(description='Active', label=True)
@@ -24,22 +29,25 @@ class SpaceAdmin(ModelAdmin):
     def make_inactive(self, request, queryset):
         queryset.update(is_active=False)
 
+@admin.register(Seat)
+class SeatAdmin(ModelAdmin):
+    list_display = ('visual_id', 'space', 'name', 'is_active')
+    list_filter = ('space__type', 'is_active')
+    search_fields = ('visual_id', 'name', 'space__name')
+
 @admin.register(Booking)
 class BookingAdmin(ModelAdmin):
-    list_display = ('full_name', 'mobile', 'space', 'booking_date_jalali', 'start_time', 'status_colored')
-    list_filter = ('status', 'space__type', 'gender', ('booking_date_jalali', JDateFieldListFilter))
+    list_display = ('full_name', 'mobile', 'seat', 'booking_type', 'start_date_jalali', 'status_colored')
+    list_filter = ('status', 'seat__space__type', 'gender', ('start_date_jalali', JDateFieldListFilter))
     search_fields = ('full_name', 'national_id', 'mobile', 'email')
     readonly_fields = ('id', 'created_at', 'updated_at')
-    date_hierarchy = 'booking_date_jalali'
+    date_hierarchy = 'start_date_jalali'
     actions = ['mark_confirmed', 'mark_cancelled', 'mark_completed']
 
     @display(description='Status', ordering='status', label=True)
     def status_colored(self, obj):
-        # Unfold handles label styling automatically with label=True if we return specific values,
-        # or we can return HTML. Unfold's "label" usually maps boolean/choices to badges.
-        # Let's try custom HTML compatible with Tailwind/Unfold.
         colors = {
-            'pending': 'warning',   # Unfold/Tailwind classes usually map to specific semantic names
+            'pending': 'warning',
             'confirmed': 'success',
             'cancelled': 'danger',
             'completed': 'info',

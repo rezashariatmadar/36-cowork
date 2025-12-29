@@ -1,81 +1,84 @@
 from django.core.management.base import BaseCommand
-from bookings.models import Space
+from bookings.models import Space, Seat
 
 class Command(BaseCommand):
-    help = 'Populates the database with the specific office layout'
+    help = 'Populates the database with the specific office layout using Seat model'
 
     def handle(self, *args, **kwargs):
-        self.stdout.write("Deleting existing spaces...")
+        self.stdout.write("Deleting existing spaces and seats...")
+        Seat.objects.all().delete()
         Space.objects.all().delete()
 
-        spaces_data = []
-
-        # 1. Dedicated Seats (12 units) - Top Area
-        # Rate assumption: 50,000/hr
-        for i in range(1, 13):
-            spaces_data.append(Space(
-                name=f"Dedicated Desk #{i}",
-                type='dedicated_desk',
-                capacity=1,
-                hourly_rate=50000,
-                description=f"Located in Top Area. Dedicated workstation {i}.",
-                is_active=True
-            ))
-
-        # 2. Joint Table (1 unit, 16 seats) - Middle Area
-        # Rate assumption: 25,000/hr (Hot desk rate)
-        spaces_data.append(Space(
-            name="The Long Joint Table",
+        # 1. Main Floor (Hot Desks & Dedicated)
+        main_floor = Space.objects.create(
+            name="Main Coworking Floor",
             type='hot_desk',
-            capacity=16,
-            hourly_rate=25000,
-            description="Located in Middle Area. Shared community table.",
-            is_active=True
-        ))
+            capacity=100,
+            hourly_rate=50000,
+            daily_rate=400000,
+            description="Open area with dedicated desks and hot desks.",
+            allow_hourly=True
+        )
 
-        # 3. Surrounding Tables (6 units, 4 seats each) - Around Middle
+        seats = []
+
+        # Dedicated Zone (D-1 to D-12)
+        for i in range(1, 13):
+            seats.append(Seat(
+                space=main_floor,
+                visual_id=f"D-{i}",
+                name=f"Dedicated Desk {i}",
+                hourly_rate=60000 # Premium for dedicated
+            ))
+
+        # Cluster Tables (T1 to T6, 4 seats each)
+        for t in range(1, 7):
+            for s in range(1, 5):
+                seats.append(Seat(
+                    space=main_floor,
+                    visual_id=f"T{t}-{s}",
+                    name=f"Table {t} Seat {s}"
+                ))
+
+        # Collab Hub (CH-L-1..6, CH-R-1..6)
         for i in range(1, 7):
-            spaces_data.append(Space(
-                name=f"Team Table #{i}",
-                type='hot_desk',
-                capacity=4,
-                hourly_rate=30000, # Slightly more for a smaller cluster?
-                description="Located around the middle area. Good for small groups.",
-                is_active=True
+            seats.append(Seat(
+                space=main_floor,
+                visual_id=f"CH-L-{i}",
+                name=f"Collab Hub Left {i}"
+            ))
+            seats.append(Seat(
+                space=main_floor,
+                visual_id=f"CH-R-{i}",
+                name=f"Collab Hub Right {i}"
             ))
 
-        # 4. Private Rooms (4 units) - Left Area (Behind Sliding Door)
-        # Rate assumption: 100,000/hr
+        # 2. Private Rooms (PR-1 to PR-4)
+        # Each has 2 seats A/B?
         for i in range(1, 5):
-            spaces_data.append(Space(
-                name=f"Private Office #{i}",
+            pr_space = Space.objects.create(
+                name=f"Private Suite {i}",
                 type='private_office',
-                capacity=1,
-                hourly_rate=100000,
-                description="Located in Left Area, behind sliding door.",
-                is_active=True
-            ))
+                capacity=2,
+                hourly_rate=150000,
+                description=f"Private office suite #{i}",
+                allow_hourly=True
+            )
+            seats.append(Seat(space=pr_space, visual_id=f"PR-{i}-A", name=f"Suite {i} Seat A"))
+            seats.append(Seat(space=pr_space, visual_id=f"PR-{i}-B", name=f"Suite {i} Seat B"))
 
-        # 5. Meeting Room (1 unit) - Right Area
-        # Rate assumption: 200,000/hr
-        spaces_data.append(Space(
-            name="Grand Meeting Room",
+        # 3. Large Suite (LPR)
+        lpr_space = Space.objects.create(
+            name="Large Suite",
             type='meeting_room',
-            capacity=13, # 10 table + 3 sofa
+            capacity=3,
             hourly_rate=200000,
-            description="Located in Right Area. Includes 10-person table and 3-person sofa area.",
-            is_active=True
-        ))
+            description="Large executive suite",
+            allow_hourly=True
+        )
+        seats.append(Seat(space=lpr_space, visual_id="LPR-1", name="Large Suite Seat 1"))
+        seats.append(Seat(space=lpr_space, visual_id="LPR-2", name="Large Suite Seat 2"))
+        seats.append(Seat(space=lpr_space, visual_id="LPR-3", name="Large Suite Seat 3"))
 
-        # 6. Additional Room (1 unit) - South of Meeting Room
-        spaces_data.append(Space(
-            name="Executive Office (South)",
-            type='private_office',
-            capacity=1,
-            hourly_rate=120000,
-            description="Located south of the meeting room.",
-            is_active=True
-        ))
-
-        Space.objects.bulk_create(spaces_data)
-        self.stdout.write(self.style.SUCCESS(f"Successfully created {len(spaces_data)} spaces."))
+        Seat.objects.bulk_create(seats)
+        self.stdout.write(self.style.SUCCESS(f"Successfully created {Space.objects.count()} spaces and {len(seats)} seats."))
